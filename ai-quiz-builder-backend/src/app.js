@@ -6,6 +6,8 @@ import rateLimit from "express-rate-limit";
 import healthRoute from "./routes/health.route.js";
 import { notFound, errorHandler } from "./middleware/error.js";
 
+import authRoute from "./routes/auth.route.js";
+
 const app = express();
 
 // Security & basics
@@ -25,6 +27,8 @@ app.use(
 
 // Routes
 app.use("/api/health", healthRoute);
+
+app.use("/api/auth", authRoute);
 
 // 404 + error
 app.use(notFound);
