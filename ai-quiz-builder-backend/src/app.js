@@ -7,6 +7,7 @@ import healthRoute from "./routes/health.route.js";
 import { notFound, errorHandler } from "./middleware/error.js";
 
 import authRoute from "./routes/auth.route.js";
+import quizzesRoute from "./routes/quizzes.route.js";
 
 const app = express();
 
@@ -27,8 +28,8 @@ app.use(
 
 // Routes
 app.use("/api/health", healthRoute);
-
 app.use("/api/auth", authRoute);
+app.use("/api/quizzes", quizzesRoute);
 
 // 404 + error
 app.use(notFound);
