@@ -1,5 +1,13 @@
 import mongoose, { Mongoose } from "mongoose";
 
+const participantSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    joinedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const questionSchema = new mongoose.Schema(
   {
     text: {
@@ -69,6 +77,10 @@ const quizSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    participants: { type: [participantSchema], default: [] },
+    startedAt: { type: Date },
+    endsAt: { type: Date },
+    endedAt: { type: Date },
 
     status: {
       type: String,
@@ -82,6 +94,13 @@ const quizSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+quizSchema.methods.addParticipantOnce = function ({ userId }) {
+  const exists = this.participants.some(
+    (p) => String(p.user) === String(userId)
+  );
+  if (!exists) this.participants.push({ user: userId });
+};
 
 const Quiz = mongoose.model("Quiz", quizSchema);
 

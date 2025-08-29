@@ -1,12 +1,25 @@
 import app from "./app.js";
+import http from "http";
 import { connectDB } from "./config/db.js";
 import { ENV } from "./config/env.js";
+import { initSocket } from "./socket/io.js";
 
 async function bootstrap() {
   try {
     await connectDB();
-    const server = app.listen(ENV.PORT, () => {
-      console.log(`server running at port $${ENV.PORT}`);
+    const server = http.createServer(app);
+
+    const io = initSocket(server, {
+      cors: {
+        origin: process.env.CLIENT_ORIGIN?.split(",") || true,
+        methods: ["GET", "POST"],
+        credentials: true,
+      },
+    });
+
+    app.set("io", io);
+    server.listen(ENV.PORT, () => {
+      console.log(`HTTP + Socket.IO running on :${ENV.PORT}`);
     });
 
     const shutdown = async (signal) => {
