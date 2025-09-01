@@ -8,12 +8,18 @@ import { notFound, errorHandler } from "./middleware/error.js";
 
 import authRoute from "./routes/auth.route.js";
 import quizzesRoute from "./routes/quizzes.route.js";
+import aiRouter from "./routes/ai.route.js";
 
 const app = express();
 
 // Security & basics
 app.use(helmet());
-app.use(cors({ origin: true, credentials: true }));
+app.use(
+  cors({
+    origin: process.env.CLIENT_ORIGIN?.split(",") || true,
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(morgan("dev"));
 
@@ -30,6 +36,7 @@ app.use(
 app.use("/api/health", healthRoute);
 app.use("/api/auth", authRoute);
 app.use("/api/quizzes", quizzesRoute);
+app.use("/api/ai", aiRouter);
 
 // 404 + error
 app.use(notFound);

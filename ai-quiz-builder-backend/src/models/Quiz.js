@@ -1,4 +1,4 @@
-import mongoose, { Mongoose } from "mongoose";
+import mongoose from "mongoose";
 
 const participantSchema = new mongoose.Schema(
   {
@@ -19,19 +19,20 @@ const questionSchema = new mongoose.Schema(
       type: [String],
       required: true,
       validate: {
-        validator: (arr) => Array.isArray(arr) && arr.length >= 2,
-        message: "give atleast 2 options",
+        validator: (arr) => Array.isArray(arr) && arr.length === 4,
+        message: "give exactly 4 options",
       },
     },
     correctIndex: {
       type: Number,
       required: true,
       min: 0,
+      max: 3,
     },
     points: {
       type: Number,
       default: 1,
-      min: 0,
+      min: 1,
     },
     explanation: {
       type: String,
@@ -91,6 +92,21 @@ const quizSchema = new mongoose.Schema(
       type: [questionSchema],
       default: [],
     },
+    aiSourceFiles: {
+      type: [
+        {
+          originalName: String,
+          mimeType: String,
+          path: String,
+          size: Number,
+          uploadedAt: { type: Date, default: Date.now },
+          uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        },
+      ],
+      default: [],
+    },
+    aiPromptNote: { type: String },
+    numQuestions: { type: Number, default: 10, min: 1, max: 200 },
   },
   { timestamps: true }
 );

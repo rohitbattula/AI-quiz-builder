@@ -1,7 +1,15 @@
+import fs from "fs";
+import path from "path";
+import multer from "multer";
 import { Router } from "express";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import Quiz from "../models/Quiz.js";
 import { generateJoinCode } from "../utils/joinCode.js";
+import { extractTextFromUploads } from "../services/ai/extract.js";
+import {
+  generateQuestions,
+  validateAndShapeQuestions,
+} from "../services/ai/gemini.js";
 
 /*
  * POST /api/quizzes
@@ -41,37 +49,78 @@ router.post(
         topic,
         difficulty = "medium",
         durationSec,
-        questions,
+        aiPromptNote,
         allowLateJoin = false,
       } = req.body;
 
+      let { questions } = req.body;
+
+      // required quiz fields
       if (!title || !topic || !durationSec) {
         return res
           .status(400)
           .json({ message: "title, topic, durationSec are required" });
       }
-      if (!Array.isArray(questions) || questions.length === 0) {
-        return res
-          .status(400)
-          .json({ message: "questions[] is required (manual mode for now)" });
-      }
 
-      for (const q of questions) {
-        if (
-          !q?.text ||
-          !Array.isArray(q.options) ||
-          q.options.length < 2 ||
-          typeof q.correctIndex !== "number" ||
-          q.correctIndex < 0 ||
-          q.correctIndex >= q.options.length
-        ) {
-          return res.status(400).json({ message: "Invalid question format" });
+      // if sent via form-data, questions may be a string
+      if (typeof questions === "string") {
+        try {
+          questions = JSON.parse(questions);
+        } catch {
+          return res
+            .status(400)
+            .json({ message: "questions must be a JSON array" });
         }
-        q.points = Number.isFinite(q.points) ? q.points : 1;
-        q.explanation = q.explanation ?? "";
       }
 
-      //joincode creation
+      if (!Array.isArray(questions) || questions.length === 0) {
+        return res.status(400).json({ message: "questions[] is required" });
+      }
+
+      // sanitize + validate with clear errors
+      const sanitized = [];
+      for (let i = 0; i < questions.length; i++) {
+        const q = questions[i] || {};
+        const text = (q.text ?? "").toString().trim();
+        const options = Array.isArray(q.options)
+          ? q.options.map((o) => (o ?? "").toString())
+          : [];
+        const correctIndex = Number(q.correctIndex);
+        const points =
+          Number.isFinite(Number(q.points)) && Number(q.points) > 0
+            ? Number(q.points)
+            : 1;
+
+        if (!text) {
+          return res
+            .status(400)
+            .json({ message: `Invalid question at index ${i}: text required` });
+        }
+        if (options.length !== 4) {
+          return res.status(400).json({
+            message: `Invalid question at index ${i}: exactly 4 options required`,
+          });
+        }
+        if (
+          !Number.isInteger(correctIndex) ||
+          correctIndex < 0 ||
+          correctIndex > 3
+        ) {
+          return res.status(400).json({
+            message: `Invalid question at index ${i}: correctIndex must be 0..3`,
+          });
+        }
+
+        sanitized.push({
+          text,
+          options: options.slice(0, 4),
+          correctIndex,
+          points,
+          explanation: (q.explanation ?? "").toString(),
+        });
+      }
+
+      // join code creation (unchanged)
       let joinCode = generateJoinCode();
       for (let i = 0; i < 5; i++) {
         const exists = await Quiz.findOne({ joinCode });
@@ -84,10 +133,11 @@ router.post(
         topic,
         difficulty,
         durationSec,
-        createdBy: req.user.id,
+        createdBy: req.user.id, // your JWT uses `id`
         joinCode,
-        questions,
+        questions: sanitized, // <-- use sanitized, validated questions
         allowLateJoin,
+        ...(aiPromptNote ? { aiPromptNote } : {}),
       });
 
       return res.status(201).json({ quiz });
@@ -122,13 +172,13 @@ router.post("/join/:joinCode", requireAuth, async (req, res, next) => {
       });
     }
 
-    quiz.addParticipantOnce({ userId: req.user._id });
+    quiz.addParticipantOnce({ userId: req.user.id });
     await quiz.save();
 
     const io = req.app.get("io");
     io?.to(`room:quiz:${quiz._id}`).emit("lobby:participant-joined", {
       quizId: String(quiz._id),
-      userId: String(req.user._id),
+      userId: String(req.user.id),
       name: req.user.name || req.user.email || "student",
       joinedAt: new Date(),
       count: quiz.participants.length,
@@ -168,9 +218,9 @@ router.get("/:quizId/lobby", requireAuth, async (req, res, next) => {
     if (!quiz) return res.status(404).json({ message: "Quiz not found" });
 
     const isOwner =
-      String(quiz.createdBy || quiz.owner) === String(req.user._id);
+      String(quiz.createdBy || quiz.owner) === String(req.user.id);
     const isParticipant = quiz.participants.some(
-      (p) => String(p.user?._id || p.user) === String(req.user._id)
+      (p) => String(p.user?.id || p.user) === String(req.user.id)
     );
     if (!isOwner && !isParticipant && req.user.role !== "admin") {
       return res.status(403).json({ message: "Not allowed" });
@@ -186,7 +236,7 @@ router.get("/:quizId/lobby", requireAuth, async (req, res, next) => {
         startedAt: quiz.startedAt,
         endsAt: quiz.endsAt,
         participants: quiz.participants.map((p) => ({
-          user: p.user?._id || p.user,
+          user: p.user?.id || p.user,
           name: p.user?.name ?? "(no name)",
           joinedAt: p.joinedAt,
         })),
@@ -218,7 +268,7 @@ router.post(
       }
 
       const ownerId = String(quiz.createdBy || quiz.owner);
-      if (ownerId != String(req.user._id)) {
+      if (ownerId != String(req.user.id)) {
         return res.status(403).json({
           message: "only owner can start",
         });
@@ -279,7 +329,7 @@ router.post(
       if (!quiz) return res.status(404).json({ message: "Quiz not found" });
 
       const ownerId = String(quiz.createdBy || quiz.owner);
-      if (ownerId !== String(req.user._id)) {
+      if (ownerId !== String(req.user.id)) {
         return res
           .status(403)
           .json({ message: "Only the owner can end the quiz" });
@@ -343,5 +393,103 @@ router.get("/:quizId/status", requireAuth, async (req, res, next) => {
     next(err);
   }
 });
+
+//AI routes
+//ai uploads
+const uploadDir =
+  process.env.AI_UPLOAD_DIR || path.join(process.cwd(), "uploads", "ai");
+fs.mkdirSync(uploadDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (_req, file, cb) => {
+    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    cb(null, `${Date.now()}_${safe}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+//AI generate: POST /api/quizzes/:quizId/ai/generate
+router.post(
+  "/:quizId/ai/generate",
+  requireAuth,
+  requireRole("teacher"),
+  upload.array("files", 8),
+  async (req, res, next) => {
+    try {
+      const quiz = await Quiz.findById(req.params.quizId);
+      if (!quiz)
+        return res.status(404).json({
+          message: "quiz not found",
+        });
+
+      const ownerId = String(quiz.createdBy || quiz.owner);
+      if (ownerId !== String(req.user.id)) {
+        return res.status(403).json({
+          message: "only the owner can generate questions",
+        });
+      }
+
+      if (quiz.status !== "draft") {
+        return res.status(409).json({
+          message: "generate only when in draft",
+        });
+      }
+
+      const files = req.files || [];
+      let sourceText = "";
+      if (files.length) {
+        const meta = files.map((f) => ({
+          originalName: f.originalname,
+          mimeType: f.mimetype,
+          path: f.path,
+          size: f.size,
+          uploadedBy: req.user.id,
+        }));
+        quiz.aiSourceFiles.push(...meta);
+        sourceText = await extractTextFromUploads(files);
+      }
+
+      const targetCount = Number(quiz.numQuestions || 10);
+      const { prompt, json } = await generateQuestions({
+        topic: quiz.topic,
+        title: quiz.title,
+        difficulty: quiz.difficulty || "medium",
+        numQuestions: targetCount,
+        sourceText,
+      });
+
+      const questions = validateAndShapeQuestions(json, targetCount);
+
+      quiz.questions = questions;
+      quiz.aiPromptNote = prompt;
+      await quiz.save();
+
+      const io = req.app.get("io");
+      io?.to(`room:quiz:${quiz._id}`).emit("ai:generated", {
+        quizId: String(quiz._id),
+        count: questions.length,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "questions generated",
+        count: questions.length,
+        quizId: quiz._id,
+      });
+    } catch (e) {
+      const status = Number(e.status) || 500;
+      return res.status(status).json({
+        message: e.message || "ai generation failed",
+      });
+    }
+  }
+);
 
 export default router;

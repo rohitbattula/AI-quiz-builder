@@ -1,4 +1,4 @@
-import { Server, Socket } from "socket.io";
+import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import Quiz from "../models/Quiz.js";
 
@@ -33,7 +33,7 @@ export function initSocket(server, ioOptions = {}) {
   });
 
   //connection
-  io.on(connection, (socket) => {
+  io.on("connection", (socket) => {
     socket.on("lobby:join", async (payload = {}, ack) => {
       try {
         const { quizId } = payload || {};
@@ -91,7 +91,7 @@ export function initSocket(server, ioOptions = {}) {
             youAreOwner: isOwner,
           },
         });
-      } catch {
+      } catch (err) {
         ack?.({ ok: false, error: { code: "INTERNAL", message: err.message } });
       }
     });
