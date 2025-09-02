@@ -23,6 +23,14 @@ const userSchema = new mongoose.Schema(
       enum: ["teacher", "student"],
       required: true,
     },
+    resetPasswordToken: {
+      type: String,
+      index: true,
+    },
+    resetPasswordExpires: {
+      type: Date,
+    },
+    passwordChangedAt: { type: Date },
   },
   { timestamps: true }
 );

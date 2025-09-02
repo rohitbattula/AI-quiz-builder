@@ -92,6 +92,9 @@ const quizSchema = new mongoose.Schema(
       type: [questionSchema],
       default: [],
     },
+
+    allowLateJoin: { type: Boolean, default: false },
+
     aiSourceFiles: {
       type: [
         {

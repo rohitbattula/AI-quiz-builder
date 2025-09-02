@@ -4,6 +4,7 @@ import multer from "multer";
 import { Router } from "express";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import Quiz from "../models/Quiz.js";
+import Attempt from "../models/Attempt.js";
 import { generateJoinCode } from "../utils/joinCode.js";
 import { extractTextFromUploads } from "../services/ai/extract.js";
 import {
@@ -36,6 +37,25 @@ function maybeAutoExpire(quiz) {
     quiz.status = "ended";
     quiz.endedAt = new Date();
   }
+}
+
+async function finalizeAttemptsForQuiz(quiz, io) {
+  const now = new Date();
+  await Attempt.updateMany(
+    {
+      quiz: quiz._id,
+      status: "active",
+    },
+    {
+      $set: {
+        status: "submitted",
+        submittedAt: now,
+      },
+    }
+  );
+  io?.to(`room:quiz:${quiz._id}`).emit("quiz:finalized", {
+    quizId: String(quiz._id),
+  });
 }
 
 router.post(
@@ -162,6 +182,10 @@ router.post("/join/:joinCode", requireAuth, async (req, res, next) => {
       return res.status(404).json({
         message: "quiz not found",
       });
+    }
+
+    if (quiz.status === "active" && !quiz.allowLateJoin) {
+      return res.status(409).json({ message: "quiz already started" });
     }
 
     maybeAutoExpire(quiz);
@@ -350,6 +374,7 @@ router.post(
       await quiz.save();
 
       const io = req.app.get("io");
+      await finalizeAttemptsForQuiz(quiz, io);
       io?.to(`room:quiz:${quiz._id}`).emit("quiz:ended", {
         quizId: String(quiz._id),
         endedAt: quiz.endedAt,
@@ -375,8 +400,17 @@ router.get("/:quizId/status", requireAuth, async (req, res, next) => {
 
     if (!quiz) return res.status(404).json({ message: "Quiz not found" });
 
+    const was = quiz.status;
     maybeAutoExpire(quiz);
-    if (quiz.isModified()) await quiz.save();
+    if (quiz.status === "ended" && was !== "ended") {
+      await quiz.save();
+      const io = req.app.get("io");
+      await finalizeAttemptsForQuiz(quiz, io);
+      io?.to(`room:quiz:${quiz._id}`).emit("quiz:ended", {
+        quizId: String(quiz._id),
+        endedAt: quiz.endedAt,
+      });
+    }
 
     return res.json({
       success: true,
@@ -491,5 +525,253 @@ router.post(
     }
   }
 );
+
+// get /api/quizzes/:quizId/questions
+router.get("/:quizId/questions", requireAuth, async (req, res, next) => {
+  try {
+    const quiz = await Quiz.findById(req.params.quizId);
+    if (!quiz)
+      return res.status(404).json({
+        message: "quiz not found",
+      });
+
+    const isOwner =
+      String(quiz.createdBy || quiz.owner) === String(req.user.id);
+    const isParticipant = quiz.participants?.some(
+      (p) => String(p.user?._id || p.user) === String(req.user.id) || false
+    );
+
+    if (!isOwner && !isParticipant && req.user.role !== "admin") {
+      return res.status(403).json({
+        message: "not allowed",
+      });
+    }
+
+    if (quiz.status === "draft" && !isOwner) {
+      return res.status(409).json({
+        message: "quiz not started yet",
+      });
+    }
+
+    const questions = (quiz.questions || []).map((q) => ({
+      text: q.text,
+      options: q.options,
+      points: q.points ?? 1,
+    }));
+
+    res.json({ success: true, questions });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// post api/quizzes/:quizId/attempts/start
+router.post("/:quizId/attempts/start", requireAuth, async (req, res, next) => {
+  try {
+    const quiz = await Quiz.findById(req.params.quizId);
+    if (!quiz)
+      return res.status(404).json({
+        message: "quiz not found",
+      });
+
+    maybeAutoExpire(quiz);
+    if (quiz.status !== "active") {
+      return res.status(409).json({
+        message: "quiz is not active",
+      });
+    }
+
+    if (
+      !quiz.participants?.some((p) => String(p.user) === String(req.user.id))
+    ) {
+      quiz.participants = quiz.participants || [];
+      quiz.participants.push({ user: req.user.id, joinedAt: new Date() });
+      await quiz.save();
+    }
+
+    const maxScore = (quiz.questions || []).reduce(
+      (s, q) => s + (Number(q.points) || 1),
+      0
+    );
+    let attempt = await Attempt.findOne({ quiz: quiz._id, user: req.user.id });
+
+    if (!attempt) {
+      attempt = await Attempt.create({
+        quiz: quiz._id,
+        user: req.user.id,
+        maxScore,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      attemptId: attempt._id,
+      startedAt: attempt.startedAt,
+      endsAt: quiz.endsAt,
+    });
+  } catch (e) {
+    if (e?.code === 11000) {
+      const retry = await Attempt.findOne({
+        quiz: req.params.quizId,
+        user: req.user.id,
+      });
+      return res.status(200).json({
+        success: true,
+        attemptId: retry._id,
+        startedAt: retry.startedAt,
+        endsAt: (await Quiz.findById(req.params.quizId))?.endsAt,
+      });
+    }
+    next(e);
+  }
+});
+
+// post /api/quizzes/:quizId/answers  body: {qIndex, selectedIndex}
+router.post("/:quizId/answers", requireAuth, async (req, res, next) => {
+  try {
+    const { qIndex, selectedIndex } = req.body || {};
+    if (!Number.isInteger(qIndex) || !Number.isInteger(selectedIndex)) {
+      return res.status(400).json({
+        message: "qindex and selectedIndex are required",
+      });
+    }
+
+    const quiz = await Quiz.findById(req.params.quizId);
+    if (!quiz)
+      return res.status(404).json({
+        message: "quiz not found",
+      });
+
+    maybeAutoExpire(quiz);
+    if (quiz.status !== "active") {
+      return res.status(409).json({
+        message: "quiz not active",
+      });
+    }
+
+    const attempt = await Attempt.findOne({
+      quiz: quiz._id,
+      user: req.user.id,
+    });
+    if (!attempt || attempt.status !== "active") {
+      return res.status(404).json({
+        message: "attempt not active",
+      });
+    }
+
+    const q = (quiz.questions || [])[qIndex];
+    if (selectedIndex < 0 || selectedIndex >= q.options.length) {
+      return res.status(400).json({ message: "selectedIndex out of range" });
+    }
+
+    if (!q) {
+      return res.status(400).json({
+        message: "invalid qIndex",
+      });
+    }
+
+    attempt.addOrUpdateAnswer({
+      qIndex,
+      selectedIndex,
+      pointsPossible: q.points || 1,
+      correctIndex: q.correctIndex,
+    });
+
+    await attempt.save();
+
+    const io = req.app.get("io");
+    io?.to(`room:quiz:${quiz._id}`).emit("answer:submitted", {
+      quizId: String(quiz._id),
+      userId: String(req.user.id),
+      qIndex,
+      score: attempt.score,
+    });
+
+    res.json({
+      success: true,
+      score: attempt.score,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// post /api/quizzes/:quizId/submit
+router.post("/:quizId/submit", requireAuth, async (req, res, next) => {
+  try {
+    const quiz = await Quiz.findById(req.params.quizId);
+    if (!quiz)
+      return res.status(404).json({
+        message: "quiz not found",
+      });
+
+    const attempt = await Attempt.findOne({
+      quiz: quiz._id,
+      user: req.user.id,
+    });
+    if (!attempt)
+      return res.status(404).json({
+        message: "attempt not found",
+      });
+
+    if (attempt.status === "submitted") {
+      return res.json({
+        success: true,
+        score: attempt.score,
+        maxScore: attempt.maxScore,
+      });
+    }
+
+    attempt.status = "submitted";
+    attempt.submittedAt = new Date();
+    await attempt.save();
+
+    const io = req.app.get("io");
+    io?.to(`room:quiz:${quiz._id}`).emit("attempt:submitted", {
+      quizId: String(quiz._id),
+      userId: String(req.user.id),
+      score: attempt.score,
+      maxScore: attempt.maxScore,
+    });
+
+    res.json({
+      success: true,
+      score: attempt.score,
+      maxScore: attempt.maxScore,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+//get /api/quizzes/:quizId/leaderboard
+router.get("/:quizId/leaderboard", requireAuth, async (req, res, next) => {
+  try {
+    const quiz = await Quiz.findById(req.params.quizId);
+    if (!quiz)
+      return res.status(404).json({
+        message: "quiz not found",
+      });
+
+    const attempts = await Attempt.find({ quiz: quiz._id })
+      .populate("user", "name email")
+      .sort({ score: -1, submittedAt: 1, startedAt: 1 })
+      .limit(200);
+
+    res.json({
+      success: true,
+      leaderboard: attempts.map((a) => ({
+        user: a.user?._id,
+        name: a.user?.name || a.user?.email,
+        score: a.score,
+        maxScore: a.maxScore,
+        status: a.status,
+        submittedAt: a.submittedAt,
+      })),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 
 export default router;

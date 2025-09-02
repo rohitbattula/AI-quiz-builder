@@ -11,7 +11,6 @@ const answerSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0,
-      max: 3,
     },
     isCorrect: {
       type: Boolean,
