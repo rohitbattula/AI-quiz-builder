@@ -1,6 +1,19 @@
 import { useAuth } from "../context/AuthProvider";
 import { Link } from "react-router-dom";
 
+function CardLink({ to, title, desc }) {
+  return (
+    <Link
+      to={to}
+      className="block rounded-lg border p-4 hover:shadow-sm hover:ring-1 hover:ring-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2"
+      role="button"
+    >
+      <h3 className="font-medium">{title}</h3>
+      <p className="text-sm text-gray-500">{desc}</p>
+    </Link>
+  );
+}
+
 export default function Dashboard() {
   const { user, logout } = useAuth();
 
@@ -44,39 +57,36 @@ export default function Dashboard() {
                 ({user?.role || "user"}).
               </p>
 
-              {/* Role-aware content */}
               {user?.role === "teacher" ? (
-                <div className="mt-4 grid sm:grid-cols-2 gap-4">
-                  <div className="rounded-lg border p-4">
-                    <h3 className="font-medium">Create a Quiz</h3>
-                    <p className="text-sm text-gray-500">
-                      Start a new quiz for your class.
-                    </p>
-                    {/* Link these once routes are ready */}
-                    {/* <Link to="/t/create" className="mt-3 inline-block rounded-md px-3 py-1.5 ring-1 ring-gray-300 hover:bg-gray-50">Open</Link> */}
-                  </div>
-                  <div className="rounded-lg border p-4">
-                    <h3 className="font-medium">Manage Lobbies</h3>
-                    <p className="text-sm text-gray-500">
-                      See who joined and start/stop quizzes.
-                    </p>
-                  </div>
+                <div className="mt-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  <CardLink
+                    to="/create"
+                    title="Create a Quiz"
+                    desc="Start a new quiz for your class."
+                  />
+                  <CardLink
+                    to="/lobbies"
+                    title="Manage Lobbies"
+                    desc="See participants and start/stop quizzes."
+                  />
+                  <CardLink
+                    to="/t/results"
+                    title="Check Results"
+                    desc="View leaderboards and scores."
+                  />
                 </div>
               ) : (
-                <div className="mt-4 grid sm:grid-cols-2 gap-4">
-                  <div className="rounded-lg border p-4">
-                    <h3 className="font-medium">Join a Quiz</h3>
-                    <p className="text-sm text-gray-500">
-                      Enter a join code from your teacher.
-                    </p>
-                    {/* <Link to="/join" className="mt-3 inline-block rounded-md px-3 py-1.5 ring-1 ring-gray-300 hover:bg-gray-50">Open</Link> */}
-                  </div>
-                  <div className="rounded-lg border p-4">
-                    <h3 className="font-medium">My Attempts</h3>
-                    <p className="text-sm text-gray-500">
-                      View past scores and leaderboards.
-                    </p>
-                  </div>
+                <div className="mt-4 grid sm:grid-cols-2 lg:grid-cols-2 gap-4">
+                  <CardLink
+                    to="/join"
+                    title="Join a Quiz"
+                    desc="Enter a join code from your teacher."
+                  />
+                  <CardLink
+                    to="/marks"
+                    title="My Marks"
+                    desc="See your past attempts and scores."
+                  />
                 </div>
               )}
             </>

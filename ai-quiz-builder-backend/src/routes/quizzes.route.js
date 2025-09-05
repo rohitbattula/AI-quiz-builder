@@ -58,6 +58,148 @@ async function finalizeAttemptsForQuiz(quiz, io) {
   });
 }
 
+function computeScore(quiz, attempt) {
+  const qs = quiz?.questions || [];
+  const a = attempt?.answers || attempt?.responses || [];
+  let score = 0,
+    totalPoints = 0,
+    correctCount = 0;
+  // build map: qIndex -> selectedIndex
+  const byIndex = new Map();
+  for (const item of a) {
+    if (typeof item.qIndex === "number")
+      byIndex.set(item.qIndex, item.selectedIndex);
+    if (typeof item.questionIndex === "number")
+      byIndex.set(item.questionIndex, item.selectedIndex);
+  }
+  for (let i = 0; i < qs.length; i++) {
+    const q = qs[i] || {};
+    const pts = Number(q.points || 1);
+    totalPoints += pts;
+    const sel = byIndex.has(i) ? byIndex.get(i) : null;
+    if (sel === q.correctIndex) {
+      score += pts;
+      correctCount += 1;
+    }
+  }
+  return { score, totalPoints, correctCount };
+}
+
+/**
+ * GET /api/quizzes/mine?status=ended
+ * Add status filter support: "ended" returns only ended; default returns non-ended as you had.
+ */
+router.get(
+  "/mine",
+  requireAuth,
+  requireRole("teacher"),
+  async (req, res, next) => {
+    try {
+      const { status } = req.query; // optional: 'draft' | 'active' | 'ended'
+      const q = { createdBy: req.user.id };
+      if (status) q.status = status;
+
+      const quizzes = await Quiz.find(q)
+        .sort({ endedAt: -1, createdAt: -1 })
+        .select(
+          "_id title topic joinCode status startedAt endsAt endedAt participants"
+        );
+
+      res.json({ success: true, data: quizzes });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/**
+ * GET /api/quizzes/:quizId/attempts/me
+ * Student's own result for this quiz.
+ */
+router.get("/:quizId/attempts/me", requireAuth, async (req, res, next) => {
+  try {
+    const { quizId } = req.params;
+    const quiz = await Quiz.findById(quizId).select("title topic").lean();
+    if (!quiz) return res.status(404).json({ message: "quiz not found" });
+
+    const a = await Attempt.findOne({
+      quiz: quizId,
+      user: req.user.id,
+      status: "submitted",
+    })
+      .sort({ submittedAt: -1 })
+      .lean();
+    if (!a) return res.status(404).json({ message: "attempt not found" });
+
+    return res.json({
+      success: true,
+      quiz: { id: quizId, title: quiz.title, topic: quiz.topic },
+      attempt: {
+        id: a._id,
+        score: a.score ?? 0,
+        maxScore: a.maxScore ?? a.totalPoints ?? 0,
+        submittedAt: a.submittedAt || a.updatedAt || null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/quizzes/:quizId/results
+ * Teacher leaderboard for this quiz (must be owner).
+ */
+router.get(
+  "/:quizId/results",
+  requireAuth,
+  requireRole("teacher"),
+  async (req, res, next) => {
+    try {
+      const { quizId } = req.params;
+      const owner = req.user._id || req.user.id;
+
+      const quiz = await Quiz.findById(quizId).lean();
+      if (!quiz) return res.status(404).json({ message: "quiz not found" });
+      if (String(quiz.createdBy) !== String(owner)) {
+        return res.status(403).json({ message: "not your quiz" });
+      }
+
+      const attempts = await Attempt.find({ quiz: quizId, status: "submitted" })
+        .populate({ path: "user", select: "name email" })
+        .sort({ submittedAt: -1 })
+        .lean();
+
+      const rows = attempts.map((a) => {
+        const s =
+          typeof a.score === "number" && typeof a.totalPoints === "number"
+            ? {
+                score: a.score,
+                totalPoints: a.totalPoints,
+                correctCount: a.correctCount || 0,
+              }
+            : computeScore(quiz, a);
+        return {
+          name: a.user?.name || "",
+          email: a.user?.email || "",
+          score: s.score,
+          totalPoints: s.totalPoints,
+          correctCount: s.correctCount,
+          submittedAt: a.submittedAt || a.updatedAt || null,
+        };
+      });
+
+      return res.json({
+        success: true,
+        quiz: { id: quiz._id, title: quiz.title, topic: quiz.topic },
+        attempts: rows,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 router.post(
   "/",
   requireAuth,
@@ -179,23 +321,38 @@ router.post("/join/:joinCode", requireAuth, async (req, res, next) => {
     const quiz = await Quiz.findOne({ joinCode });
 
     if (!quiz) {
-      return res.status(404).json({
-        message: "quiz not found",
-      });
+      return res.status(404).json({ message: "quiz not found" });
     }
 
+    // late-join check
     if (quiz.status === "active" && !quiz.allowLateJoin) {
       return res.status(409).json({ message: "quiz already started" });
     }
 
+    // auto-expire, then check ended
     maybeAutoExpire(quiz);
-    if (quiz.status == "ended") {
+    if (quiz.status === "ended") {
       if (quiz.isModified()) await quiz.save();
-      return res.status(409).json({
-        message: "quiz already ended",
-      });
+      return res.status(409).json({ message: "quiz already ended" });
     }
 
+    // ⬇️ NEW: block re-join if already submitted this quiz
+    const userId = req.user.id || req.user._id;
+    const prior = await Attempt.findOne({
+      quiz: quiz._id,
+      user: userId,
+      $or: [{ status: "submitted" }, { submittedAt: { $ne: null } }],
+    }).lean();
+
+    if (prior) {
+      return res.status(409).json({
+        message: "quiz already written once",
+        code: "ALREADY_SUBMITTED",
+      });
+    }
+    // ⬆️ END NEW
+
+    // add as participant (idempotent)
     quiz.addParticipantOnce({ userId: req.user.id });
     await quiz.save();
 
@@ -350,18 +507,20 @@ router.post(
   async (req, res, next) => {
     try {
       const quiz = await Quiz.findById(req.params.quizId);
-      if (!quiz) return res.status(404).json({ message: "Quiz not found" });
-
-      const ownerId = String(quiz.createdBy || quiz.owner);
-      if (ownerId !== String(req.user.id)) {
-        return res
-          .status(403)
-          .json({ message: "Only the owner can end the quiz" });
+      if (!quiz) {
+        return res.status(404).json({
+          message: "quiz not found",
+        });
       }
 
-      maybeAutoExpire(quiz);
+      const ownerId = String(quiz.createdBy || quiz.owner);
+      if (ownerId != String(req.user.id)) {
+        return res.status(403).json({
+          message: "only owner can end",
+        });
+      }
+
       if (quiz.status === "ended") {
-        if (quiz.isModified()) await quiz.save();
         return res.status(200).json({
           success: true,
           message: "Quiz already ended",
@@ -369,12 +528,13 @@ router.post(
         });
       }
 
+      // mark as ended now
+      const now = new Date();
       quiz.status = "ended";
-      quiz.endedAt = new Date();
+      quiz.endedAt = now;
       await quiz.save();
 
       const io = req.app.get("io");
-      await finalizeAttemptsForQuiz(quiz, io);
       io?.to(`room:quiz:${quiz._id}`).emit("quiz:ended", {
         quizId: String(quiz._id),
         endedAt: quiz.endedAt,
@@ -382,8 +542,8 @@ router.post(
       });
 
       return res.status(200).json({ success: true, endedAt: quiz.endedAt });
-    } catch (err) {
-      next(err);
+    } catch (e) {
+      next(e);
     }
   }
 );
@@ -773,5 +933,62 @@ router.get("/:quizId/leaderboard", requireAuth, async (req, res, next) => {
     next(e);
   }
 });
+
+router.get(
+  "/mine",
+  requireAuth,
+  requireRole("teacher"),
+  async (req, res, next) => {
+    try {
+      const ownerId = req.user.id || req.user._id;
+      const quizzes = await Quiz.find({
+        createdBy: ownerId,
+        status: { $ne: "ended" },
+      })
+        .sort({ createdAt: -1 })
+        .select(
+          "title topic status durationSec joinCode startedAt endsAt createdAt"
+        );
+
+      res.json({ quizzes });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+router.delete(
+  "/:quizId",
+  requireAuth,
+  requireRole("teacher"),
+  async (req, res, next) => {
+    try {
+      const { quizId } = req.params;
+      const ownerId = req.user.id || req.user._id;
+
+      const quiz = await Quiz.findOne({ _id: quizId, createdBy: ownerId });
+      if (!quiz) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Quiz not found" });
+      }
+
+      if (quiz.status !== "draft") {
+        return res.status(400).json({
+          success: false,
+          message: "Only draft quizzes can be deleted",
+        });
+      }
+
+      // Defensive cleanup
+      await Attempt.deleteMany({ quiz: quiz._id });
+      await quiz.deleteOne();
+
+      return res.json({ success: true, deletedId: quizId });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 export default router;

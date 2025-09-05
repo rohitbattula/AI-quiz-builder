@@ -11,6 +11,13 @@ router.post("/register", async (req, res, next) => {
   try {
     const { name, email, password, role } = req.body;
 
+    if (!password || password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters.",
+      });
+    }
+
     if (!name || !email || !password || !role) {
       return res.status(400).json({
         message: "all fields are required",
@@ -147,6 +154,15 @@ router.get("/verify-reset-token", async (req, res, next) => {
 router.post("/reset-password", async (req, res, next) => {
   try {
     const { token, password } = req.body() || {};
+
+    if (!password || password.length < 8) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "Password must be at least 8 characters.",
+        });
+    }
     if (!token || !password) {
       return res.status(400).json({
         message: "token and password required",
