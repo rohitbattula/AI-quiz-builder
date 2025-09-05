@@ -2,6 +2,7 @@ import { Router } from "express";
 import Attempt from "../models/Attempt.js";
 import Quiz from "../models/Quiz.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { getPaging, packPage } from "../utils/paginate.js";
 
 const router = Router();
 
@@ -12,25 +13,33 @@ router.get(
   requireRole("student"),
   async (req, res, next) => {
     try {
-      const userId = req.user.id;
-      const attempts = await Attempt.find({ user: userId, status: "submitted" })
-        .sort({ submittedAt: -1 })
-        .populate({ path: "quiz", select: "title topic" })
-        .lean();
+      const { page, limit, skip } = getPaging(req, { defaultLimit: 10 });
 
-      const out = attempts.map((a) => ({
+      const base = { user: req.user.id, status: "submitted" }; // only submitted attempts in marks
+      const [attempts, total] = await Promise.all([
+        Attempt.find(base)
+          .sort({ submittedAt: -1 })
+          .select("_id quiz score maxScore totalPoints submittedAt")
+          .populate({ path: "quiz", select: "title topic" })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        Attempt.countDocuments(base),
+      ]);
+
+      const items = attempts.map((a) => ({
         id: a._id,
-        quizId: a.quiz?._id || a.quiz,
-        quizTitle: a.quiz?.title || "",
-        quizTopic: a.quiz?.topic || "",
-        score: a.score ?? 0,
-        maxScore: a.maxScore ?? a.totalPoints ?? 0,
-        submittedAt: a.submittedAt || a.updatedAt || null,
+        quizId: a.quiz?._id,
+        quizTitle: a.quiz?.title,
+        quizTopic: a.quiz?.topic,
+        score: a.score,
+        maxScore: a.maxScore ?? a.totalPoints,
+        submittedAt: a.submittedAt,
       }));
 
-      res.json({ success: true, attempts: out });
-    } catch (err) {
-      next(err);
+      return res.json(packPage({ items, total, page, limit }));
+    } catch (e) {
+      next(e);
     }
   }
 );

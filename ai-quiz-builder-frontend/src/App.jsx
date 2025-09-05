@@ -14,6 +14,7 @@ import StudentResult from "./pages/StudentResult";
 import MyMarks from "./pages/MyMarks";
 import TeacherResults from "./pages/TeacherResults";
 import TeacherQuizResults from "./pages/TeacherQuizResults";
+import NotFound from "./pages/NotFound";
 
 export default function App() {
   return (
@@ -108,6 +109,7 @@ export default function App() {
           </Protected>
         }
       />
+      <Route path="*" element={<NotFound />} />
     </Routes>
   );
 }

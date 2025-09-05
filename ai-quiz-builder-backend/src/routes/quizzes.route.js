@@ -11,6 +11,7 @@ import {
   generateQuestions,
   validateAndShapeQuestions,
 } from "../services/ai/gemini.js";
+import { getPaging, packPage } from "../utils/paginate.js";
 
 /*
  * POST /api/quizzes
@@ -95,17 +96,25 @@ router.get(
   requireRole("teacher"),
   async (req, res, next) => {
     try {
-      const { status } = req.query; // optional: 'draft' | 'active' | 'ended'
+      const { status } = req.query; // optional
+      const { page, limit, skip } = getPaging(req, { defaultLimit: 10 });
+
       const q = { createdBy: req.user.id };
       if (status) q.status = status;
 
-      const quizzes = await Quiz.find(q)
-        .sort({ endedAt: -1, createdAt: -1 })
-        .select(
-          "_id title topic joinCode status startedAt endsAt endedAt participants"
-        );
+      const [items, total] = await Promise.all([
+        Quiz.find(q)
+          .sort({ endedAt: -1, createdAt: -1 })
+          .select(
+            "_id title topic joinCode status startedAt endsAt endedAt participants"
+          )
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        Quiz.countDocuments(q),
+      ]);
 
-      res.json({ success: true, data: quizzes });
+      return res.json(packPage({ items, total, page, limit }));
     } catch (e) {
       next(e);
     }
@@ -158,6 +167,7 @@ router.get(
     try {
       const { quizId } = req.params;
       const owner = req.user._id || req.user.id;
+      const { page, limit, skip } = getPaging(req, { defaultLimit: 10 });
 
       const quiz = await Quiz.findById(quizId).lean();
       if (!quiz) return res.status(404).json({ message: "quiz not found" });
@@ -165,12 +175,18 @@ router.get(
         return res.status(403).json({ message: "not your quiz" });
       }
 
-      const attempts = await Attempt.find({ quiz: quizId, status: "submitted" })
-        .populate({ path: "user", select: "name email" })
-        .sort({ submittedAt: -1 })
-        .lean();
+      const base = { quiz: quizId, status: "submitted" };
+      const [attempts, total] = await Promise.all([
+        Attempt.find(base)
+          .populate({ path: "user", select: "name email" })
+          .sort({ submittedAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        Attempt.countDocuments(base),
+      ]);
 
-      const rows = attempts.map((a) => {
+      const items = attempts.map((a) => {
         const s =
           typeof a.score === "number" && typeof a.totalPoints === "number"
             ? {
@@ -192,7 +208,7 @@ router.get(
       return res.json({
         success: true,
         quiz: { id: quiz._id, title: quiz.title, topic: quiz.topic },
-        attempts: rows,
+        ...packPage({ items, total, page, limit }).data, // merge pagination fields at top level
       });
     } catch (err) {
       next(err);
