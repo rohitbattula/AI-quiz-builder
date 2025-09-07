@@ -22,14 +22,3 @@ AI Quiz Builder lets **teachers** create/run live quizzes (manual or AI-generate
 **Realtime**: Socket.IO  
 **AI**: Google Gemini API  
 **Security**: JWT, Helmet, CORS, Rate limit
-
----
-
-## ⚙️ Environment Setup
-
-### 1) Clone
-
-```bash
-git clone https://github.com/rohitbattula/ai-quiz-builder.git
-cd ai-quiz-builder
-```
