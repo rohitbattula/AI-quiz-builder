@@ -14,6 +14,7 @@ import StudentResult from "./pages/StudentResult";
 import MyMarks from "./pages/MyMarks";
 import TeacherResults from "./pages/TeacherResults";
 import TeacherQuizResults from "./pages/TeacherQuizResults";
+import ResetPassword from "./pages/ResetPassword";
 import NotFound from "./pages/NotFound";
 
 export default function App() {
@@ -109,6 +110,7 @@ export default function App() {
           </Protected>
         }
       />
+      <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );

@@ -153,15 +153,13 @@ router.get("/verify-reset-token", async (req, res, next) => {
 // post /api/auth/reset-password
 router.post("/reset-password", async (req, res, next) => {
   try {
-    const { token, password } = req.body() || {};
+    const { token, password } = req.body || {};
 
     if (!password || password.length < 8) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Password must be at least 8 characters.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters.",
+      });
     }
     if (!token || !password) {
       return res.status(400).json({
